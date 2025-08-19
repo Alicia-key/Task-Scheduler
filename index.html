@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Task Scheduler</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>⏰ Task Scheduler</h1>
+            <p>Stay on time with your daily tasks</p>
+        </header>
+
+        <div class="task-form">
+            <h2>Add New Task</h2>
+            <form id="taskForm">
+                <div class="form-group">
+                    <label for="taskName">Task Name:</label>
+                    <input type="text" id="taskName" placeholder="Enter task name" required>
+                </div>
+                
+                <div class="time-group">
+                    <div class="form-group">
+                        <label for="startTime">Start Time:</label>
+                        <input type="time" id="startTime" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="endTime">End Time:</label>
+                        <input type="time" id="endTime" required>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="taskDescription">Description (optional):</label>
+                    <textarea id="taskDescription" placeholder="Add any additional details..."></textarea>
+                </div>
+
+                <div class="form-group checkbox-group">
+                    <input type="checkbox" id="isRecurring">
+                    <label for="isRecurring">Everyday Task (resets daily)</label>
+                </div>
+
+                <button type="submit" class="add-btn">➕ Add Task</button>
+            </form>
+        </div>
+
+        <div class="tasks-section">
+            <h2>Your Tasks</h2>
+            <div class="task-controls">
+                <button id="clearAll" class="clear-btn">🗑️ Clear All</button>
+                <button id="sortByTime" class="sort-btn">🕐 Sort by Time</button>
+            </div>
+            <div id="taskList" class="task-list">
+                <!-- Tasks will be displayed here -->
+            </div>
+        </div>
+
+        <div class="current-time">
+            <span id="currentTime"></span>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html> 
