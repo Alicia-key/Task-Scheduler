@@ -1,14 +1,29 @@
+// Add your Google Apps Script Web App URL here
+const API_ENDPOINT = 'https://script.google.com/macros/s/AKfycbwmj-kk6cXt9GpM3ahmZ3xDHClhtexwLLQJZuo0DRXQwVT9NqwRH6QoaSEZ-9ncBWYzDQ/exec';
+
 class TaskScheduler {
     constructor() {
-        this.tasks = JSON.parse(localStorage.getItem('tasks')) || [];
+        // Initialize tasks as empty; they will be loaded asynchronously
+        this.tasks = [];
+        // Recurring task definitions are still managed locally for daily reset logic
         this.recurringTasks = JSON.parse(localStorage.getItem('recurringTasks')) || this.getDefaultRecurringTasks();
         this.lastResetDate = localStorage.getItem('lastResetDate');
         
         this.initializeElements();
         this.bindEvents();
         this.updateCurrentTime();
-        this.checkAndResetDailyTasks(); // New: Check and reset daily tasks
-        this.renderTasks();
+        
+        // Use an async IIFE (Immediately Invoked Function Expression) to handle async calls in constructor
+        (async () => {
+            console.log('TaskScheduler: Starting initialization...');
+            await this.loadTasks(); // Load tasks from Google Sheet
+            console.log('TaskScheduler: Tasks loaded. Checking and resetting daily tasks...');
+            this.checkAndResetDailyTasks(); // Check and reset daily tasks after loading
+            console.log('TaskScheduler: Daily tasks checked. Rendering tasks...');
+            this.renderTasks(); // Render tasks after loading and potential reset
+            console.log('TaskScheduler: Initialization complete.');
+        })();
+
         this.startTimeTracking();
     }
 
@@ -39,18 +54,32 @@ class TaskScheduler {
         ];
     }
 
-    checkAndResetDailyTasks() {
+    async checkAndResetDailyTasks() {
         const today = new Date().toISOString().split('T')[0];
         if (this.lastResetDate !== today) {
             console.log('New day detected, resetting recurring tasks.');
-            this.resetRecurringTasks();
-            this.lastResetDate = today;
-            localStorage.setItem('lastResetDate', this.lastResetDate);
+            // Prepare new instances of recurring tasks with unique IDs for today
+            const newRecurringInstances = this.recurringTasks.map(rTask => ({
+                ...rTask,
+                id: `recurring-${Date.now()}-${rTask.name.replace(/\s/g, '-')}`,
+                completed: false,
+                createdAt: new Date().toISOString()
+            }));
+
+            const apiResponse = await this.sendToAPI('resetRecurringTasks', { newRecurringInstances: newRecurringInstances });
+            if (apiResponse.success) {
+                this.lastResetDate = today;
+                this.saveRecurringTasksLocally(); // Save updated lastResetDate locally
+                await this.loadTasks(); // Reload all tasks, including the newly reset recurring ones
+                this.renderTasks();
+            } else {
+                this.showNotification(apiResponse.message || 'Failed to reset daily tasks.', 'error');
+            }
         } else {
             console.log('Same day, no need to reset recurring tasks.');
         }
-        // Ensure recurring tasks are always in the main tasks array
-        this.addRecurringTasksToMainTasks();
+        // Ensure recurring tasks are always in the main tasks array after loading
+        // This is handled by loadTasks now.
     }
 
     resetRecurringTasks() {
@@ -70,36 +99,59 @@ class TaskScheduler {
         this.saveTasks();
     }
 
-    addRecurringTasksToMainTasks() {
-        // This method is now primarily for ensuring initial population of recurring tasks
-        // The daily reset handles subsequent additions
-        const existingRecurringTaskNamesInCurrentTasks = new Set(this.tasks.filter(task => task.isRecurring).map(task => task.name));
-        const existingRecurringTaskNamesInStoredRecurringTasks = new Set(this.recurringTasks.map(task => task.name));
+    // This method is primarily for initial population of recurring tasks from defaults
+    // or when adding a new recurring task via the form.
+    async addRecurringTasksToMainTasks(forceAdd = false) {
+        console.log('addRecurringTasksToMainTasks: started. forceAdd:', forceAdd);
+        
+        // this.tasks should already be up-to-date from the initial load in the constructor
 
-        this.recurringTasks.forEach(rTask => {
-            // Add to main tasks only if it's not already there AND it's a new recurring task
-            if (!existingRecurringTaskNamesInCurrentTasks.has(rTask.name)) {
-                const newTask = { ...rTask, completed: false, id: `recurring-${Date.now()}-${rTask.name.replace(/\s/g, '-')}` };
-                this.tasks.push(newTask);
+        // Removed recursive call to loadTasks() here that caused issues
+
+        const existingRecurringTaskNamesInCurrentTasks = new Set(this.tasks.filter(task => task.isRecurring).map(task => task.name));
+        console.log('addRecurringTasksToMainTasks: Current tasks after initial load:', this.tasks); 
+        console.log('addRecurringTasksToMainTasks: Existing recurring tasks in current tasks:', Array.from(existingRecurringTaskNamesInCurrentTasks));
+        console.log('addRecurringTasksToMainTasks: Default/local recurring tasks to check:', this.recurringTasks.map(t => t.name));
+
+        let tasksAdded = false; // Flag to check if any tasks were added
+        for (const rTask of this.recurringTasks) {
+            if (forceAdd || !existingRecurringTaskNamesInCurrentTasks.has(rTask.name)) {
+                console.log(`addRecurringTasksToMainTasks: Attempting to add recurring task: ${rTask.name}`);
+                const newTaskInstance = { 
+                    ...rTask, 
+                    id: `recurring-${Date.now()}-${rTask.name.replace(/\s/g, '-')}`,
+                    completed: false,
+                    createdAt: new Date().toISOString()
+                };
+                const apiResponse = await this.sendToAPI('addTask', { task: newTaskInstance });
+                if (apiResponse.success) {
+                    console.log(`addRecurringTasksToMainTasks: Successfully added recurring task to sheet: ${rTask.name}`, apiResponse);
+                    tasksAdded = true;
+                } else {
+                    console.error(`addRecurringTasksToMainTasks: Failed to add recurring task ${rTask.name} to sheet:`, apiResponse.message);
+                }
+            } else {
+                console.log(`addRecurringTasksToMainTasks: Recurring task "${rTask.name}" already exists in sheet (or was added), skipping add.`);
             }
-        });
-        // Ensure any new recurring tasks (e.g. added through getDefaultRecurringTasks or directly by user) are saved in recurringTasks storage
-        this.recurringTasks.forEach(rTask => {
-            if (!existingRecurringTaskNamesInStoredRecurringTasks.has(rTask.name)) {
-                this.recurringTasks.push(rTask); // Add to persistent recurring list
-            }
-        });
-        this.saveTasks();
+        }
+        
+        if (tasksAdded) {
+            console.log('addRecurringTasksToMainTasks: New recurring tasks were added. Reloading and rendering tasks...');
+            await this.loadTasks(); // This reload is correctly placed here, after the loop finishes
+            this.renderTasks();
+        } else {
+            console.log('addRecurringTasksToMainTasks: No new recurring tasks needed to be added during initialization.');
+        }
     }
 
-    handleAddTask(e) {
+    async handleAddTask(e) {
         e.preventDefault();
         
         const taskName = this.taskNameInput.value.trim();
         const startTime = this.startTimeInput.value;
         const endTime = this.endTimeInput.value;
         const description = this.taskDescriptionInput.value.trim();
-        const isRecurring = this.isRecurringInput.checked; // New: Get recurring status
+        const isRecurring = this.isRecurringInput.checked;
 
         if (!taskName || !startTime || !endTime) {
             this.showNotification('Please fill in all required fields', 'error');
@@ -111,43 +163,36 @@ class TaskScheduler {
             return;
         }
 
-        const task = {
-            id: Date.now(),
+        const newTask = {
+            id: isRecurring ? taskName.replace(/\s/g, '-').toLowerCase() : Date.now().toString(), // Use string IDs for both
             name: taskName,
             startTime: startTime,
             endTime: endTime,
             description: description,
             completed: false,
             createdAt: new Date().toISOString(),
-            isRecurring: isRecurring // Set based on checkbox
+            isRecurring: isRecurring
         };
 
-        if (isRecurring) {
-            // Add to recurring tasks for persistence across days
-            // Use a simpler ID for recurring tasks when saving to recurringTasks
-            const recurringTaskBase = {
-                id: task.name.replace(/\s/g, '-').toLowerCase(), // Simplified ID for recurring tasks
-                name: task.name,
-                startTime: task.startTime,
-                endTime: task.endTime,
-                description: task.description,
-                completed: false, // Always start uncompleted for recurring
-                isRecurring: true,
-                createdAt: new Date().toISOString()
-            };
-            // Check if a recurring task with the same name already exists to prevent duplicates
-            if (!this.recurringTasks.some(r => r.name === recurringTaskBase.name)) {
-                this.recurringTasks.push(recurringTaskBase);
+        const apiResponse = await this.sendToAPI('addTask', { task: newTask });
+        if (apiResponse.success) {
+            // After successful addition to sheet, reload tasks to update local state
+            await this.loadTasks(); 
+            this.renderTasks();
+            this.resetForm();
+            this.showNotification('Task added successfully!', 'success');
+
+            if (isRecurring) {
+                // Add to recurringTasks locally for daily reset logic, if not already present
+                const existingRecurringTask = this.recurringTasks.find(r => r.name === newTask.name);
+                if (!existingRecurringTask) {
+                    this.recurringTasks.push({ ...newTask, id: newTask.name.replace(/\s/g, '-').toLowerCase() }); // Save base recurring task with simple ID
+                    this.saveRecurringTasksLocally();
+                }
             }
-            // Ensure the current instance added to `this.tasks` has a unique ID for the day
-            this.tasks.push({ ...task, id: Date.now() }); 
         } else {
-            this.tasks.push(task);
+            this.showNotification(apiResponse.message || 'Failed to add task.', 'error');
         }
-        this.saveTasks();
-        this.renderTasks();
-        this.resetForm();
-        this.showNotification('Task added successfully!', 'success');
     }
 
     resetForm() {
@@ -156,75 +201,98 @@ class TaskScheduler {
         this.isRecurringInput.checked = false; // Reset checkbox
     }
 
-    deleteTask(taskId) {
-        const taskToDelete = this.tasks.find(task => task.id === taskId);
-        if (!taskToDelete) return;
+    async deleteTask(taskId) {
+        console.log('Attempting to delete task with ID:', taskId);
+        const taskToDelete = this.tasks.find(task => task.id == taskId); // Use == for loose comparison
+        if (!taskToDelete) {
+            console.log('Task with ID not found:', taskId);
+            this.showNotification('Task not found for deletion.', 'error');
+            return;
+        }
 
+        let confirmMessage = 'Are you sure you want to delete this task?';
         if (taskToDelete.isRecurring) {
-            if (confirm('This is a recurring task. Do you want to remove it from your everyday tasks permanently?')) {
-                this.recurringTasks = this.recurringTasks.filter(task => task.name !== taskToDelete.name); // Filter by name for simplicity with default recurring tasks
-                this.tasks = this.tasks.filter(task => task.id !== taskId); // Remove the instance from current tasks
-                this.saveTasks();
-                this.renderTasks();
-                this.showNotification('Recurring task removed!', 'success');
+            confirmMessage = 'This is a recurring task. Do you want to remove it from your everyday tasks permanently?';
+        }
+
+        if (confirm(confirmMessage)) {
+            let apiResponse;
+            if (taskToDelete.isRecurring) {
+                // If it's a recurring task, remove it from the local recurring list
+                this.recurringTasks = this.recurringTasks.filter(task => task.name !== taskToDelete.name);
+                this.saveRecurringTasksLocally();
+                // Then, delete its current instance from the Google Sheet
+                apiResponse = await this.sendToAPI('deleteTask', { taskId: taskId });
+            } else {
+                apiResponse = await this.sendToAPI('deleteTask', { taskId: taskId });
             }
-        } else {
-            this.tasks = this.tasks.filter(task => task.id !== taskId);
-            this.saveTasks();
-            this.renderTasks();
-            this.showNotification('Task deleted successfully!', 'success');
+
+            if (apiResponse.success) {
+                await this.loadTasks(); // Reload tasks after deletion
+                this.renderTasks();
+                this.showNotification('Task deleted successfully!', 'success');
+            } else {
+                this.showNotification(apiResponse.message || 'Failed to delete task.', 'error');
+            }
         }
     }
 
-    toggleTaskComplete(taskId) {
+    async toggleTaskComplete(taskId) {
         console.log('Attempting to toggle task with ID:', taskId);
-        const task = this.tasks.find(t => t.id === taskId);
+        const task = this.tasks.find(t => t.id == taskId); // Use == for loose comparison
         if (task) {
             console.log('Task found:', task);
             console.log('Task completed status BEFORE toggle:', task.completed);
 
-            // For recurring tasks, toggle completion only for the current instance.
-            // A new instance will be generated uncompleted tomorrow.
-            if (task.isRecurring) {
-                task.completed = !task.completed;
+            const newCompletedStatus = !task.completed;
+            const apiResponse = await this.sendToAPI('updateTask', { 
+                taskId: taskId, 
+                updates: { completed: newCompletedStatus } 
+            });
+
+            if (apiResponse.success) {
+                // Update local task object and re-render only if API call succeeded
+                task.completed = newCompletedStatus;
+                console.log('Task completed status AFTER toggle:', task.completed);
+                this.renderTasks();
+                const status = task.completed ? 'completed' : 'marked as incomplete';
+                this.showNotification(`Task ${status}!`, 'success');
             } else {
-                // For non-recurring tasks, simply toggle completion
-                task.completed = !task.completed;
+                this.showNotification(apiResponse.message || 'Failed to update task status.', 'error');
             }
-            console.log('Task completed status AFTER toggle:', task.completed);
-            this.saveTasks();
-            console.log('saveTasks() called.');
-            this.renderTasks();
-            const status = task.completed ? 'completed' : 'marked as incomplete';
-            this.showNotification(`Task ${status}!`, 'success');
         } else {
             console.log('Task with ID not found:', taskId);
         }
     }
 
-    clearAllTasks() {
-        if (this.tasks.length === 0) {
-            this.showNotification('No tasks to clear', 'info');
+    async clearAllTasks() {
+        if (this.tasks.filter(task => !task.isRecurring).length === 0) {
+            this.showNotification('No one-time tasks to clear', 'info');
             return;
         }
 
         if (confirm('Are you sure you want to delete all ONE-TIME tasks? Recurring tasks will remain.')) {
-            this.tasks = this.tasks.filter(task => task.isRecurring); // Only keep recurring tasks
-            this.saveTasks();
-            this.renderTasks();
-            this.showNotification('All tasks cleared!', 'success');
+            const apiResponse = await this.sendToAPI('clearOneTimeTasks');
+            if (apiResponse.success) {
+                await this.loadTasks(); // Reload tasks after clearing
+                this.renderTasks();
+                this.showNotification('All one-time tasks cleared!', 'success');
+            } else {
+                this.showNotification(apiResponse.message || 'Failed to clear one-time tasks.', 'error');
+            }
         }
     }
 
-    sortTasksByTime() {
+    async sortTasksByTime() {
+        // Sort locally, as this is a display preference
         this.tasks.sort((a, b) => {
             const timeA = new Date(`2000-01-01T${a.startTime}`);
             const timeB = new Date(`2000-01-01T${b.startTime}`);
             return timeA - timeB;
         });
-        this.saveTasks();
         this.renderTasks();
         this.showNotification('Tasks sorted by start time!', 'success');
+        // Note: Sorting is a client-side display action, no need to save back to sheet immediately
     }
 
     getTaskStatus(task) {
@@ -311,11 +379,60 @@ class TaskScheduler {
         }, 1000);
     }
 
-    saveTasks() {
-        // Save all current tasks, including recurring task instances with their current completion status
-        localStorage.setItem('tasks', JSON.stringify(this.tasks));
-        // Save the base recurring task definitions separately
+    // --- New API Communication Functions ---
+    async fetchFromAPI() {
+        try {
+            const response = await fetch(API_ENDPOINT);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            const data = await response.json();
+            return data;
+        } catch (error) {
+            console.error('Error fetching data from API:', error);
+            this.showNotification('Failed to load tasks from server.', 'error');
+            return []; // Return empty array on error
+        }
+    }
+
+    async sendToAPI(action, payload = {}) {
+        try {
+            const response = await fetch(API_ENDPOINT, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ action, ...payload }),
+            });
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            const data = await response.json();
+            if (!data.success) {
+                throw new Error(data.message || 'API request failed');
+            }
+            return data;
+        } catch (error) {
+            console.error('Error sending data to API:', error);
+            this.showNotification(`Server error: ${error.message || 'Action failed'}`, 'error');
+            return { success: false, message: error.message };
+        }
+    }
+
+    // --- Modified Task Handling Functions ---
+
+    async loadTasks() {
+        console.log('Loading tasks from Google Sheet...');
+        this.tasks = await this.fetchFromAPI();
+        // Ensure recurring tasks from default are present if sheet is empty or only has one-time tasks
+        this.addRecurringTasksToMainTasks(true); // Pass true to force re-add recurring tasks upon load
+        this.saveRecurringTasksLocally(); // Save local parts only
+    }
+
+    // Modified saveTasks to only handle local storage parts
+    saveRecurringTasksLocally() {
         localStorage.setItem('recurringTasks', JSON.stringify(this.recurringTasks));
+        localStorage.setItem('lastResetDate', this.lastResetDate);
     }
 
     showNotification(message, type = 'info') {
